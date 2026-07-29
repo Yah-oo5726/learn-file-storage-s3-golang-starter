@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"crypto/rand"
+	"encoding/base64"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -70,7 +72,14 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "You are not allowed to upload a thumbnail for this video", nil)
 		return
 	}
-	assetPath := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", video.ID, fileType[6:]))
+	filenameBytes := make([]byte, 16)
+	_, err = rand.Read(filenameBytes)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't generate filename", err)
+		return
+	}
+	filename := base64.RawURLEncoding.EncodeToString(filenameBytes)
+	assetPath := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", filename, fileType[6:]))
 	out, err := os.Create(assetPath)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create file", err)
