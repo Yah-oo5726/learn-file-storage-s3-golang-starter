@@ -13,8 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 
 	s3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -80,6 +83,30 @@ func processVideoForFastStart(filepath string) (string, error) {
 	return outputPath, nil
 }
 
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	s3PresignClient := s3.NewPresignClient(s3Client)
+	req, err := s3PresignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{Bucket: &bucket, Key: &key}, s3.WithPresignExpires(expireTime))
+	if err != nil {
+		return "", err
+	}
+	return req.URL, nil
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	if video.VideoURL == nil || *video.VideoURL == "" {
+		return video, nil
+	}
+	videoBucketKeyList := strings.Split(*video.VideoURL, ",")
+	videoBucket := videoBucketKeyList[0]
+	videoKey := videoBucketKeyList[1]
+	signedURL, err := generatePresignedURL(cfg.s3Client, videoBucket, videoKey, 15*time.Minute)
+	if err != nil {
+		return database.Video{}, err
+	}
+	video.VideoURL = &signedURL
+	return video, nil
+}
+
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 10<<30) // 1 GB limit
 	videoIDString := r.PathValue("videoID")
@@ -98,9 +125,14 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusUnauthorized, "Invalid JWT", err)
 		return
 	}
-	video, err := cfg.db.GetVideo(videoID)
+	UnsignedVideo, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, "Video not found", err)
+		return
+	}
+	video, err := cfg.dbVideoToSignedVideo(UnsignedVideo)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to generate signed URL", err)
 		return
 	}
 	if video.UserID != userID {
@@ -189,7 +221,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Failed to upload video to S3", err)
 		return
 	}
-	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, filenameWithPrefix)
+	videoURL := fmt.Sprintf("%s,%s", cfg.s3Bucket, filenameWithPrefix)
 	video.VideoURL = &videoURL
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
